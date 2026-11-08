@@ -170,7 +170,7 @@ func chkError(t *testing.T, got error, want string) {
 		t.Fatalf("got %v; want %v", got, want)
 	}
 	if got != nil {
-		t.SkipNow()
+		t.Skipf("expected error %q returned; remaining checks do not apply", want)
 	}
 }
 

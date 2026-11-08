@@ -1,0 +1,101 @@
+name: seal-build
+
+# golang.org/x/text ships no GitHub Actions CI of its own (upstream tests run on
+# the Go project's own TryBot infrastructure), so this workflow is authored for
+# the sealed build. It packs the module zip exactly as the module proxy does and
+# runs the repository's real suite -- `go build ./...` and `go test ./...`
+# (README.md) -- on every OS this package must cover. go.mod declares go 1.23.0.
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Go package/test selector to narrow the suite; empty runs the full suite"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  MODULE_PATH: golang.org/x/text
+  MODULE_VERSION: v0.25.0
+
+jobs:
+  module-zip:
+    name: module zip
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false
+
+      - name: Build the module-zip helper outside the checkout
+        run: |
+          set -eux
+          HELPER="$(mktemp -d)"
+          cp "$GITHUB_WORKSPACE/.github/create_mod.go" "$HELPER/"
+          cd "$HELPER"
+          go mod init example.com/createmod
+          go get golang.org/x/mod@v0.24.0
+          go build -o "$RUNNER_TEMP/create_mod" create_mod.go
+
+      - name: Pack the module zip
+        run: |
+          set -eux
+          mkdir -p "$RUNNER_TEMP/out"
+          # The packed tree must be the module as published: this workflow and
+          # its helper are seal-build scaffolding and upstream ships no .github
+          # directory at all, so remove it before packing.
+          rm -rf "$GITHUB_WORKSPACE/.github"
+          "$RUNNER_TEMP/create_mod" \
+            "$MODULE_PATH" \
+            "$MODULE_VERSION" \
+            "$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/out/$MODULE_VERSION.zip"
+          unzip -l "$RUNNER_TEMP/out/$MODULE_VERSION.zip" | tail -n 5
+
+      - name: Upload the module zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: ${{ runner.temp }}/out/v0.25.0.zip
+          if-no-files-found: error
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false
+
+      - name: Build
+        run: |
+          set -eux
+          go version
+          go build ./...
+
+      - name: Test
+        # Full suite: `go test -v ./...`, with the unicode.org data-backed
+        # packages run under upstream's -long flag; prints a per-skip report.
+        run: bash .github/seal-go-test.sh "${{ inputs.test-filter }}"
